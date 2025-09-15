@@ -1,0 +1,13 @@
+{
+  "AzureOpenAI": {
+    "Endpoint": "",
+    "ApiKey": "",
+    "ChatModelId": "gpt-5",
+    "EmbeddingModelId": "text-embedding-ada-002"
+  },
+  "AzureAISearch": {
+    "Endpoint": "",
+    "ApiKey": "",
+    "IndexName": ""
+  }
+}
