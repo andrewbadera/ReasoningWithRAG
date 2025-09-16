@@ -31,6 +31,10 @@ class AzureAISearchConfig:
     endpoint: str = ""
     api_key: str = ""
     index_name: str = ""
+    # Hybrid search configuration
+    vector_search_k: int = 50  # Number of vector search candidates
+    use_semantic_search: bool = False  # Whether to use semantic search
+    semantic_configuration_name: Optional[str] = None
 
 
 @dataclass
@@ -44,6 +48,8 @@ class AppConfig:
         with open(config_path, 'r') as f:
             data = json.load(f)
         
+        search_config = data["AzureAISearch"]
+        
         return cls(
             azure_openai=AzureOpenAIConfig(
                 endpoint=data["AzureOpenAI"]["Endpoint"],
@@ -52,9 +58,12 @@ class AppConfig:
                 embedding_model_id=data["AzureOpenAI"]["EmbeddingModelId"]
             ),
             azure_ai_search=AzureAISearchConfig(
-                endpoint=data["AzureAISearch"]["Endpoint"],
-                api_key=data["AzureAISearch"]["ApiKey"],
-                index_name=data["AzureAISearch"]["IndexName"]
+                endpoint=search_config["Endpoint"],
+                api_key=search_config["ApiKey"],
+                index_name=search_config["IndexName"],
+                vector_search_k=search_config.get("VectorSearchK", 50),
+                use_semantic_search=search_config.get("UseSemanticSearch", False),
+                semantic_configuration_name=search_config.get("SemanticConfigurationName")
             )
         )
 
@@ -108,8 +117,9 @@ class RagService:
             print(f"Creating search index '{self.index_name}'...")
             
             fields = [
-                SearchField("title", SearchFieldDataType.String, searchable=True, filterable=True),
-                SearchField("chunk", SearchFieldDataType.String, searchable=True),
+                SearchField("id", SearchFieldDataType.String, key=True, retrievable=True),
+                SearchField("title", SearchFieldDataType.String, searchable=True, filterable=True, retrievable=True),
+                SearchField("chunk", SearchFieldDataType.String, searchable=True, retrievable=True),
                 SearchField(
                     "text_vector",
                     SearchFieldDataType.Collection(SearchFieldDataType.Single),
@@ -142,20 +152,33 @@ class RagService:
         return response.data[0].embedding
 
     async def search_documents_async(self, query: str, limit: int = 3) -> List[DocumentSearchResult]:
-        """Search for documents using vector similarity"""
+        """Search for documents using hybrid search (vector similarity + text search with RRF)"""
         query_embedding = await self._generate_embedding_async(query)
 
         vector_query = VectorizedQuery(
             vector=query_embedding,
-            k_nearest_neighbors=limit,
+            k_nearest_neighbors=self.config.azure_ai_search.vector_search_k,
             fields="text_vector"
         )
 
-        search_results = self.search_client.search(
-            search_text=None,
-            vector_queries=[vector_query],
-            top=limit
-        )
+        search_params = {
+            "search_text": query,  # Text search component
+            "vector_queries": [vector_query],  # Vector search component
+            "top": limit,
+            "select": ["title", "chunk", "id"],  # Only retrieve needed fields
+            "search_fields": ["title", "chunk"]  # Specify which fields to search in for text search
+        }
+
+        # Add semantic search if enabled
+        if self.config.azure_ai_search.use_semantic_search:
+            search_params["query_type"] = "semantic"
+            if self.config.azure_ai_search.semantic_configuration_name:
+                search_params["semantic_configuration_name"] = self.config.azure_ai_search.semantic_configuration_name
+
+        # Perform hybrid search with both vector and text search
+        # Azure AI Search automatically applies Reciprocal Rank Fusion (RRF) 
+        # when both search_text and vector_queries are provided
+        search_results = self.search_client.search(**search_params)
 
         results = []
         for result in search_results:
@@ -242,6 +265,23 @@ Answer:"""
         
         return final_response
 
+    async def add_document_async(self, document_id: str, title: str, content: str):
+        """Add a document to the search index"""
+        # Generate embedding for the content
+        embedding = await self._generate_embedding_async(content)
+        
+        # Create document for indexing
+        document = {
+            "id": document_id,
+            "title": title,
+            "chunk": content,
+            "text_vector": embedding
+        }
+        
+        # Upload document to the index
+        result = self.search_client.upload_documents([document])
+        return result
+
     async def remove_document_async(self, id: str):
         """Remove a document from the search index"""
         self.search_client.delete_documents([{"id": id}])
@@ -275,8 +315,7 @@ async def main():
         print(response_with_citations)
         
     except FileNotFoundError:
-        print("Configuration file not found. Please create appsettings.json with your Azure credentials.")
-        print("You can copy from ../SemanticKernel/appsettings.sample.json and fill in your values.")
+        print("Configuration file not found. Please create settings.json with your Azure credentials.")
     except Exception as e:
         print(f"An error occurred: {e}")
 

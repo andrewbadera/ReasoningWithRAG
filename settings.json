@@ -8,6 +8,9 @@
   "AzureAISearch": {
     "Endpoint": "",
     "ApiKey": "",
-    "IndexName": ""
+    "IndexName": "",
+    "VectorSearchK": 50,
+    "UseSemanticSearch": false,
+    "SemanticConfigurationName": null
   }
 }
